@@ -1,0 +1,170 @@
+param(
+  [string]$ServiceName = "FirebirdServerDefaultInstance",
+  [string]$DownloadUrl = "https://github.com/FirebirdSQL/firebird/releases/download/v3.0.13/Firebird-3.0.13.33818-0-x64.exe",
+  [string]$Tasks       = "UseSuperServerTask,UseServiceTask,AutoStartTask,CopyFbClientToSysTask,CopyFbClientAsGds32Task",
+
+  # Domyślnie POMIŃ sprawdzanie podpisu
+  [switch]$NoSignatureCheck = $true,
+
+  # Opcjonalnie: włącz weryfikację SHA256 (zamiast podpisu)
+  [switch]$VerifySha256,
+  [string]$ExpectedSha256 = '6e53bb7642a390027118f576669f7913ea7a652eca7d2dc41c86e2be94d3fb06',
+
+  # === FBVERPUSH ===
+  [switch]$RunFbVerPush = $true,
+  [string]$FbVerPushUrl = 'https://github.com/tornister76/fbverpush/blob/main/fbverpush.ps1',
+  [string[]]$FbVerPushArgs
+)
+
+# --- Admin check ---
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  Write-Error "Run PowerShell as Administrator."
+  exit 1
+}
+
+$ErrorActionPreference = "Stop"
+$ProgressPreference    = "SilentlyContinue"
+
+# --- TLS 1.2 ---
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+# --- Paths ---
+$downloadDir  = Join-Path $env:TEMP "firebird-install"
+New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+$installerFile = Join-Path $downloadDir ([System.IO.Path]::GetFileName(($DownloadUrl -split '\?')[0]))
+
+# --- Stop service ---
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+  Write-Host ("Stopping service {0}..." -f $ServiceName) -ForegroundColor Cyan
+  Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+  (Get-Service -Name $ServiceName).WaitForStatus('Stopped',[TimeSpan]::FromMinutes(1))
+} else {
+  Write-Host ("Service {0} not found (continuing)..." -f $ServiceName) -ForegroundColor Yellow
+}
+
+# Kill possible processes
+"fbserver","fbguard","firebird","fb_inet_server" | ForEach-Object {
+  Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+# --- Download installer (retry) ---
+for ($i=1; $i -le 3; $i++) {
+  try {
+    Write-Host ("Downloading installer (attempt {0}/3)..." -f $i) -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $installerFile -UseBasicParsing
+    if ((Test-Path $installerFile) -and ((Get-Item $installerFile).Length -gt 1MB)) { break }
+    throw "Downloaded file size suspicious."
+  } catch {
+    if ($i -eq 3) { throw }
+    Start-Sleep -Seconds 3
+  }
+}
+
+# --- Trust gate ---
+if ($VerifySha256) {
+  $hash = (Get-FileHash -Path $installerFile -Algorithm SHA256).Hash.ToLower()
+  if ($hash -ne $ExpectedSha256.ToLower()) {
+    throw ("Checksum mismatch! expected {0}, got {1}" -f $ExpectedSha256, $hash)
+  }
+  Write-Host ("SHA256 ok: {0}" -f $hash) -ForegroundColor Green
+} elseif (-not $NoSignatureCheck) {
+  $sig = Get-AuthenticodeSignature -FilePath $installerFile
+  if ($sig.Status -ne 'Valid') {
+    Write-Warning ("Installer Authenticode status: {0}" -f $sig.Status)
+    throw "Aborting due to signature status."
+  }
+}
+
+# --- Silent install (Inno Setup) ---
+$arguments = @(
+  '/SILENT',
+  '/NORESTART',
+  ('/TASKS="{0}"' -f $Tasks)
+)
+
+Write-Host ("Running installer: {0} {1}" -f (Split-Path $installerFile -Leaf), ($arguments -join ' ')) -ForegroundColor Cyan
+$proc = Start-Process -FilePath $installerFile -ArgumentList $arguments -Wait -PassThru
+$exitCode = $proc.ExitCode
+if ($exitCode -ne 0) { throw ("Installer exit code: {0}" -f $exitCode) }
+
+# --- Start service ---
+$svcStartOk = $false
+try {
+  Write-Host ("Starting service {0}..." -f $ServiceName) -ForegroundColor Cyan
+  Start-Service -Name $ServiceName
+  (Get-Service -Name $ServiceName).WaitForStatus('Running',[TimeSpan]::FromSeconds(30))
+  $svcStartOk = $true
+} catch {
+  Write-Warning ("Could not start service {0}: {1}" -f $ServiceName, $_.Exception.Message)
+}
+
+# --- Detect installed version ---
+function Get-FirebirdInstallPath {
+  $regPath = 'HKLM:\SOFTWARE\Firebird Project\Firebird Server\Instances'
+  $val = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue)."DefaultInstance"
+  if ($val -and (Test-Path $val)) { return $val }
+  foreach ($c in @("C:\Program Files\Firebird\Firebird_3_0","C:\Program Files (x86)\Firebird\Firebird_3_0")) {
+    if (Test-Path $c) { return $c }
+  }
+  return $null
+}
+
+$fbPath = Get-FirebirdInstallPath
+$version = $null
+if ($fbPath) {
+  $exe = Join-Path $fbPath "fbserver.exe"
+  if (-not (Test-Path $exe)) { $exe = Join-Path $fbPath "firebird.exe" }
+  if (Test-Path $exe) { $version = (Get-Item $exe).VersionInfo.ProductVersion }
+}
+
+# --- SUMMARY ---
+$svcStatus = "unknown"
+try { $svcStatus = (Get-Service -Name $ServiceName -ErrorAction Stop).Status } catch {}
+
+Write-Host ""
+Write-Host "== SUMMARY ==" -ForegroundColor Green
+Write-Host ("Service: {0} -> {1}" -f $ServiceName, $svcStatus)
+Write-Host ("Installer: {0}" -f $installerFile)
+if ($version) { Write-Host ("Detected version: {0}" -f $version) }
+Write-Host ("Completed successfully (installer exit code = {0})." -f $exitCode) -ForegroundColor Green
+
+if (-not $svcStartOk) {
+  if ($fbPath) {
+    $log = Join-Path $fbPath "firebird.log"
+    if (Test-Path $log) {
+      Write-Host "`nLast 80 lines of firebird.log:" -ForegroundColor Yellow
+      Get-Content $log -Tail 80
+    }
+  }
+}
+
+# === FBVERPUSH (download & run at the end) ===
+function ConvertTo-RawGithubUrl {
+  param([Parameter(Mandatory=$true)][string]$Url)
+  if ($Url -match '^https?://github\.com/.+?/blob/.+$') {
+    return $Url -replace '^https?://github\.com/','https://raw.githubusercontent.com/' -replace '/blob/','/'
+  }
+  return $Url
+}
+
+if ($RunFbVerPush) {
+  try {
+    $rawUrl = ConvertTo-RawGithubUrl -Url $FbVerPushUrl
+    $fbVerPushPath = Join-Path $downloadDir "fbverpush.ps1"
+    Write-Host ("Downloading fbverpush from: {0}" -f $rawUrl) -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $rawUrl -OutFile $fbVerPushPath -UseBasicParsing
+
+    if (-not (Test-Path $fbVerPushPath) -or (Get-Item $fbVerPushPath).Length -lt 1KB) {
+      throw "fbverpush.ps1 download looks suspicious (size < 1KB)."
+    }
+
+    Write-Host ("Running fbverpush.ps1 {0}" -f (($FbVerPushArgs ?? @()) -join ' ')) -ForegroundColor Cyan
+    $psiArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $fbVerPushPath) + ($FbVerPushArgs ?? @())
+    $p2 = Start-Process -FilePath 'powershell.exe' -ArgumentList $psiArgs -Wait -PassThru
+    $fbExit = $p2.ExitCode
+    Write-Host ("fbverpush exit code: {0}" -f $fbExit) -ForegroundColor Green
+  } catch {
+    Write-Warning ("fbverpush failed: {0}" -f $_.Exception.Message)
+  }
+}
