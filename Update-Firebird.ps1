@@ -159,11 +159,23 @@ if ($RunFbVerPush) {
       throw "fbverpush.ps1 download looks suspicious (size < 1KB)."
     }
 
-    Write-Host ("Running fbverpush.ps1 {0}" -f (($FbVerPushArgs ?? @()) -join ' ')) -ForegroundColor Cyan
-    $psiArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $fbVerPushPath) + ($FbVerPushArgs ?? @())
-    $p2 = Start-Process -FilePath 'powershell.exe' -ArgumentList $psiArgs -Wait -PassThru
-    $fbExit = $p2.ExitCode
-    Write-Host ("fbverpush exit code: {0}" -f $fbExit) -ForegroundColor Green
+    # Zbuduj bezpieczny łańcuch argumentów (PS 5.1 nie lubi nulli w ArgumentList)
+    $fbArgsSafe = @()
+    if ($null -ne $FbVerPushArgs) {
+      $fbArgsSafe = $FbVerPushArgs | Where-Object { $_ -ne $null -and $_ -ne '' }
+    }
+
+    # Escaping parametrów (spacje/cudzysłowy)
+    $quotedArgs = $fbArgsSafe | ForEach-Object {
+      if ($_ -match '[\s"`]') { '"' + ($_ -replace '"','`"') + '"' } else { $_ }
+    }
+
+    $argStr = '-NoProfile -ExecutionPolicy Bypass -File ' + ('"{0}"' -f $fbVerPushPath)
+    if ($quotedArgs.Count -gt 0) { $argStr += ' ' + ($quotedArgs -join ' ') }
+
+    Write-Host ("Running fbverpush.ps1 {0}" -f ($quotedArgs -join ' ')) -ForegroundColor Cyan
+    $p2 = Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -Wait -PassThru
+    Write-Host ("fbverpush exit code: {0}" -f $p2.ExitCode) -ForegroundColor Green
   } catch {
     Write-Warning ("fbverpush failed: {0}" -f $_.Exception.Message)
   }
