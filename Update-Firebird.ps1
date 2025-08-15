@@ -23,6 +23,49 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   exit 1
 }
 
+# === INSTALL GATE: proceed only if Firebird v3 is installed AND < 3.0.13 ===
+$didInstall = $false  # zostanie ustawione na $true po udanym upgrade
+
+function Get-FBInstallInfo {
+  $obj = [PSCustomObject]@{ Path=$null; Exe=$null; Version=$null; VersionString=$null }
+  $regPath = 'HKLM:\SOFTWARE\Firebird Project\Firebird Server\Instances'
+  $val = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue)."DefaultInstance"
+  if ($val -and (Test-Path $val)) {
+    $obj.Path = $val
+    $exe = Join-Path $val 'fbserver.exe'
+    if (-not (Test-Path $exe)) { $exe = Join-Path $val 'firebird.exe' }
+    if (Test-Path $exe) {
+      $obj.Exe = $exe
+      $verStr = (Get-Item $exe).VersionInfo.ProductVersion
+      $obj.VersionString = $verStr
+      try {
+        # wytnij nienumeryczny ogon, zostaw tylko X.Y.Z.W
+        $obj.Version = [Version]($verStr -replace '[^\d\.].*$','')
+      } catch { }
+    }
+  }
+  return $obj
+}
+
+$fb = Get-FBInstallInfo
+$target = [Version]'3.0.13.0'
+
+if (-not $fb.Version) {
+  Write-Host "Skip: Firebird 3 not found on this machine. No action." -ForegroundColor Yellow
+  return
+}
+if ($fb.Version.Major -ne 3) {
+  Write-Host ("Skip: Installed Firebird is v{0} (not 3.x). No action." -f $fb.VersionString) -ForegroundColor Yellow
+  return
+}
+if ($fb.Version -ge $target) {
+  Write-Host ("Skip: Firebird 3 is already {0} (>= 3.0.13). No action." -f $fb.VersionString) -ForegroundColor Yellow
+  return
+}
+
+Write-Host ("Upgrade required: current {0} < 3.0.13. Continuing..." -f $fb.VersionString) -ForegroundColor Cyan
+
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
 
@@ -87,6 +130,7 @@ Write-Host ("Running installer: {0} {1}" -f (Split-Path $installerFile -Leaf), (
 $proc = Start-Process -FilePath $installerFile -ArgumentList $arguments -Wait -PassThru
 $exitCode = $proc.ExitCode
 if ($exitCode -ne 0) { throw ("Installer exit code: {0}" -f $exitCode) }
+$didInstall = $true
 
 # --- Start service ---
 $svcStartOk = $false
@@ -140,6 +184,7 @@ if (-not $svcStartOk) {
 }
 
 # === FBVERPUSH (download & run at the end) ===
+if ($RunFbVerPush -and $didInstall) {
 function ConvertTo-RawGithubUrl {
   param([Parameter(Mandatory=$true)][string]$Url)
   if ($Url -match '^https?://github\.com/.+?/blob/.+$') {
@@ -179,4 +224,7 @@ if ($RunFbVerPush) {
   } catch {
     Write-Warning ("fbverpush failed: {0}" -f $_.Exception.Message)
   }
+}
+} else {
+  Write-Host "Skipping fbverpush (no install performed or disabled)." -ForegroundColor Yellow
 }
