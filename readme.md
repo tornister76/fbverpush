@@ -48,6 +48,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p
 3. **Kompatybilność**: Automatycznie naprawia składnię dla PowerShell < 7.0
 4. **Uruchomienie**: Wykonuje skrypt z odpowiednimi parametrami bezpieczeństwa
 
+## Tryby działania
+
+### Tryb standardowy (zawsze instaluje klienta)
+Skrypt automatycznie sprawdza wersję Firebird i **zawsze** instaluje komponenty klienta:
+- Jeśli Firebird < 3.0.13 → wykonuje upgrade serwera **+ instaluje klienta**
+- Jeśli Firebird ≥ 3.0.13 → instaluje **tylko klienta**
+
+W obu przypadkach:
+- Zatrzymuje usługę Firebird (jeśli działa)
+- Wykonuje odpowiednią instalację
+- Przywraca stan usługi (uruchamia tylko jeśli była uruchomiona wcześniej)
+
+### Tryb legacy (tylko dla kompatybilności wstecznej)
+Użyj parametru `-InstallClientOnly $false` aby wyłączyć automatyczną instalację klienta:
+
+```powershell
+# Tylko upgrade serwera (bez klienta) - nie zalecane
+powershell -NoProfile -ExecutionPolicy Bypass -File Update-Firebird.ps1 -InstallClientOnly $false
+```
+
+## Przykłady użycia
+
+### Standardowe użycie (zalecane)
+```powershell
+# Pobierz i uruchom - automatycznie wykryje czy potrzebny upgrade i zawsze zainstaluje klienta
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+$u='https://raw.githubusercontent.com/tornister76/fbverpush/main/Update-Firebird.ps1'
+$s=irm $u
+$p=Join-Path $env:TEMP 'Update-Firebird.ps1'
+Set-Content -Path $p -Value $s -Encoding UTF8
+powershell -NoProfile -ExecutionPolicy Bypass -File $p
+```
+
+**Co się dzieje:**
+- Jeśli Firebird < 3.0.13: upgrade serwera → instalacja klienta
+- Jeśli Firebird ≥ 3.0.13: tylko instalacja klienta
+
+### Jedna linia (najszybsze)
+```powershell
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $u='https://raw.githubusercontent.com/tornister76/fbverpush/main/Update-Firebird.ps1'; $s=irm $u; $p=Join-Path $env:TEMP 'Update-Firebird.ps1'; Set-Content -Path $p -Value $s -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $p
+```
+
 ## Rozwiązywanie problemów
 
 ### PowerShell nie jest rozpoznawany
