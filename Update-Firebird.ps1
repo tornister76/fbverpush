@@ -10,6 +10,10 @@ param(
   [switch]$VerifySha256,
   [string]$ExpectedSha256 = '6e53bb7642a390027118f576669f7913ea7a652eca7d2dc41c86e2be94d3fb06',
 
+  # === CLIENT INSTALLATION ===
+  [switch]$InstallClientOnly = $false,
+  [string]$ClientTasks = "CopyFbClientToSysTask,CopyFbClientAsGds32Task",
+
   # === FBVERPUSH ===
   [switch]$RunFbVerPush = $true,
   [string]$FbVerPushUrl = 'https://github.com/tornister76/fbverpush/blob/main/fbverpush.ps1',
@@ -58,13 +62,17 @@ if ($fb.Version.Major -ne 3) {
   Write-Host ("Skip: Installed Firebird is v{0} (not 3.x). No action." -f $fb.VersionString) -ForegroundColor Yellow
   return
 }
+# Determine installation type
+$isClientOnlyInstall = $false
+$needsServerUpgrade = $false
+
 if ($fb.Version -ge $target) {
-  Write-Host ("Skip: Firebird 3 is already {0} (>= 3.0.13). No action." -f $fb.VersionString) -ForegroundColor Yellow
-  return
+  Write-Host ("Firebird 3 is already {0} (>= 3.0.13). Installing client components..." -f $fb.VersionString) -ForegroundColor Cyan
+  $isClientOnlyInstall = $true
+} else {
+  Write-Host ("Upgrade required: current {0} < 3.0.13. Will upgrade server and then install client..." -f $fb.VersionString) -ForegroundColor Cyan
+  $needsServerUpgrade = $true
 }
-
-Write-Host ("Upgrade required: current {0} < 3.0.13. Continuing..." -f $fb.VersionString) -ForegroundColor Cyan
-
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
@@ -77,16 +85,23 @@ $downloadDir  = Join-Path $env:TEMP "firebird-install"
 New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
 $installerFile = Join-Path $downloadDir ([System.IO.Path]::GetFileName(($DownloadUrl -split '\?')[0]))
 
-# --- Stop service ---
+# --- Stop service (for both server upgrade and client installation) ---
+$serviceWasRunning = $false
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-  Write-Host ("Stopping service {0}..." -f $ServiceName) -ForegroundColor Cyan
-  Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-  (Get-Service -Name $ServiceName).WaitForStatus('Stopped',[TimeSpan]::FromMinutes(1))
+  $service = Get-Service -Name $ServiceName
+  if ($service.Status -eq 'Running') {
+    $serviceWasRunning = $true
+    Write-Host ("Stopping service {0}..." -f $ServiceName) -ForegroundColor Cyan
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+    (Get-Service -Name $ServiceName).WaitForStatus('Stopped',[TimeSpan]::FromMinutes(1))
+  } else {
+    Write-Host ("Service {0} is already stopped." -f $ServiceName) -ForegroundColor Yellow
+  }
 } else {
   Write-Host ("Service {0} not found (continuing)..." -f $ServiceName) -ForegroundColor Yellow
 }
 
-# Kill possible processes
+# Kill possible processes (important for both scenarios)
 "fbserver","fbguard","firebird","fb_inet_server" | ForEach-Object {
   Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
@@ -120,27 +135,80 @@ if ($VerifySha256) {
 }
 
 # --- Silent install (Inno Setup) ---
-$arguments = @(
-  '/SILENT',
-  '/NORESTART',
-  ('/TASKS="{0}"' -f $Tasks)
-)
+if ($isClientOnlyInstall) {
+  # Client-only installation
+  $arguments = @(
+    '/SILENT',
+    '/NORESTART',
+    '/COMPONENTS="ClientComponent"',
+    ('/TASKS="{0}"' -f $ClientTasks)
+  )
+  Write-Host "Installing Firebird client components only..." -ForegroundColor Cyan
 
-Write-Host ("Running installer: {0} {1}" -f (Split-Path $installerFile -Leaf), ($arguments -join ' ')) -ForegroundColor Cyan
-$proc = Start-Process -FilePath $installerFile -ArgumentList $arguments -Wait -PassThru
-$exitCode = $proc.ExitCode
-if ($exitCode -ne 0) { throw ("Installer exit code: {0}" -f $exitCode) }
-$didInstall = $true
+  Write-Host ("Running installer: {0} {1}" -f (Split-Path $installerFile -Leaf), ($arguments -join ' ')) -ForegroundColor Cyan
+  $proc = Start-Process -FilePath $installerFile -ArgumentList $arguments -Wait -PassThru
+  $exitCode = $proc.ExitCode
+  if ($exitCode -ne 0) { throw ("Installer exit code: {0}" -f $exitCode) }
+  $didInstall = $true
+
+} else {
+  # Full server installation/upgrade FOLLOWED BY client installation
+  Write-Host "Step 1: Installing/upgrading Firebird server..." -ForegroundColor Cyan
+  $serverArguments = @(
+    '/SILENT',
+    '/NORESTART',
+    ('/TASKS="{0}"' -f $Tasks)
+  )
+
+  Write-Host ("Running server installer: {0} {1}" -f (Split-Path $installerFile -Leaf), ($serverArguments -join ' ')) -ForegroundColor Cyan
+  $proc = Start-Process -FilePath $installerFile -ArgumentList $serverArguments -Wait -PassThru
+  $exitCode = $proc.ExitCode
+  if ($exitCode -ne 0) { throw ("Server installer exit code: {0}" -f $exitCode) }
+
+  # Now install client components
+  Write-Host "Step 2: Installing Firebird client components..." -ForegroundColor Cyan
+  $clientArguments = @(
+    '/SILENT',
+    '/NORESTART',
+    '/COMPONENTS="ClientComponent"',
+    ('/TASKS="{0}"' -f $ClientTasks)
+  )
+
+  Write-Host ("Running client installer: {0} {1}" -f (Split-Path $installerFile -Leaf), ($clientArguments -join ' ')) -ForegroundColor Cyan
+  $proc2 = Start-Process -FilePath $installerFile -ArgumentList $clientArguments -Wait -PassThru
+  $clientExitCode = $proc2.ExitCode
+  if ($clientExitCode -ne 0) { throw ("Client installer exit code: {0}" -f $clientExitCode) }
+
+  $didInstall = $true
+}
 
 # --- Start service ---
 $svcStartOk = $false
-try {
-  Write-Host ("Starting service {0}..." -f $ServiceName) -ForegroundColor Cyan
-  Start-Service -Name $ServiceName
-  (Get-Service -Name $ServiceName).WaitForStatus('Running',[TimeSpan]::FromSeconds(30))
-  $svcStartOk = $true
-} catch {
-  Write-Warning ("Could not start service {0}: {1}" -f $ServiceName, $_.Exception.Message)
+if ($isClientOnlyInstall) {
+  # For client-only installation, start service only if it was running before
+  if ($serviceWasRunning) {
+    try {
+      Write-Host ("Restarting service {0} (was running before client installation)..." -f $ServiceName) -ForegroundColor Cyan
+      Start-Service -Name $ServiceName
+      (Get-Service -Name $ServiceName).WaitForStatus('Running',[TimeSpan]::FromSeconds(30))
+      $svcStartOk = $true
+    } catch {
+      Write-Warning ("Could not restart service {0}: {1}" -f $ServiceName, $_.Exception.Message)
+    }
+  } else {
+    Write-Host ("Service {0} was not running before client installation - leaving stopped." -f $ServiceName) -ForegroundColor Yellow
+    $svcStartOk = $true  # Consider this OK since we're not trying to start it
+  }
+} else {
+  # For server upgrade, always try to start the service
+  try {
+    Write-Host ("Starting service {0}..." -f $ServiceName) -ForegroundColor Cyan
+    Start-Service -Name $ServiceName
+    (Get-Service -Name $ServiceName).WaitForStatus('Running',[TimeSpan]::FromSeconds(30))
+    $svcStartOk = $true
+  } catch {
+    Write-Warning ("Could not start service {0}: {1}" -f $ServiceName, $_.Exception.Message)
+  }
 }
 
 # --- Detect installed version ---
@@ -168,6 +236,11 @@ try { $svcStatus = (Get-Service -Name $ServiceName -ErrorAction Stop).Status } c
 
 Write-Host ""
 Write-Host "== SUMMARY ==" -ForegroundColor Green
+if ($isClientOnlyInstall) {
+  Write-Host "Installation type: CLIENT COMPONENTS ONLY" -ForegroundColor Cyan
+} else {
+  Write-Host "Installation type: SERVER UPGRADE + CLIENT COMPONENTS" -ForegroundColor Cyan
+}
 Write-Host ("Service: {0} -> {1}" -f $ServiceName, $svcStatus)
 Write-Host ("Installer: {0}" -f $installerFile)
 if ($version) { Write-Host ("Detected version: {0}" -f $version) }
