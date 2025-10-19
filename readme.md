@@ -16,12 +16,6 @@ Skrypt do automatycznego pobierania i uruchamiania narzędzia Update-Firebird z 
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 $u='https://raw.githubusercontent.com/tornister76/fbverpush/main/Update-Firebird.ps1'
 $s=irm $u
-# Patch tylko dla PS < 7: usuń '??' i dodaj bezpieczne $fbArgsSafe
-if($PSVersionTable.PSVersion.Major -lt 7){
-  $insert = "`r`n  " + '$fbArgsSafe = if ($null -ne $FbVerPushArgs) { $FbVerPushArgs } else { @() }'
-  $s = [regex]::Replace($s, 'if\s*\(\s*\$RunFbVerPush\s*\)\s*\{', ('$&' + $insert))
-  $s = [regex]::Replace($s, '\(\s*\$FbVerPushArgs\s*\?\?\s*@\(\s*\)\s*\)', '$fbArgsSafe')
-}
 $p=Join-Path $env:TEMP 'Update-Firebird.ps1'
 Set-Content -Path $p -Value $s -Encoding UTF8
 powershell -NoProfile -ExecutionPolicy Bypass -File $p
@@ -38,15 +32,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p
 ### Metoda 3: Jedna linia (dla zaawansowanych)
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $u='https://raw.githubusercontent.com/tornister76/fbverpush/main/Update-Firebird.ps1'; $s=irm $u; if($PSVersionTable.PSVersion.Major -lt 7){ $insert = "`r`n  " + '$fbArgsSafe = if ($null -ne $FbVerPushArgs) { $FbVerPushArgs } else { @() }'; $s = [regex]::Replace($s, 'if\s*\(\s*\$RunFbVerPush\s*\)\s*\{', ('$&' + $insert)); $s = [regex]::Replace($s, '\(\s*\$FbVerPushArgs\s*\?\?\s*@\(\s*\)\s*\)', '$fbArgsSafe') }; $p=Join-Path $env:TEMP 'Update-Firebird.ps1'; Set-Content -Path $p -Value $s -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $p
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $u='https://raw.githubusercontent.com/tornister76/fbverpush/main/Update-Firebird.ps1'; $s=irm $u; $p=Join-Path $env:TEMP 'Update-Firebird.ps1'; Set-Content -Path $p -Value $s -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $p
 ```
 
 ## Opis działania
 
 1. **Konfiguracja TLS**: Ustawia TLS 1.2 dla bezpiecznego połączenia HTTPS
 2. **Pobieranie skryptu**: Ściąga najnowszą wersję z GitHub
-3. **Kompatybilność**: Automatycznie naprawia składnię dla PowerShell < 7.0
-4. **Uruchomienie**: Wykonuje skrypt z odpowiednimi parametrami bezpieczeństwa
+3. **Uruchomienie**: Wykonuje skrypt z odpowiednimi parametrami bezpieczeństwa
 
 ## Tryby działania
 
@@ -54,8 +47,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $p
 Skrypt automatycznie sprawdza wersję Firebird i **zawsze** instaluje komponenty klienta:
 - Jeśli Firebird < 3.0.13 → wykonuje upgrade serwera **+ instaluje klienta**
 - Jeśli Firebird ≥ 3.0.13 → instaluje **tylko klienta**
+- Jeśli wykryto folder `C:\Program Files\Firebird\Firebird_3_0` bez `firebird.exe` → instaluje **tylko klienta** (instalacja/aktualizacja klienta na maszynie bez serwera)
 
-W obu przypadkach:
+W każdym przypadku:
 - Zatrzymuje usługę Firebird (jeśli działa)
 - Wykonuje odpowiednią instalację
 - Przywraca stan usługi (uruchamia tylko jeśli była uruchomiona wcześniej)
@@ -126,8 +120,9 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine
 - ✅ Automatyczna kompatybilność z PowerShell 5.1+
 - ✅ Bezpieczne pobieranie przez HTTPS
 - ✅ Tymczasowe przechowywanie w folderze TEMP
-- ✅ Automatyczne czyszczenie składni dla starszych wersji PS
+- ✅ Detekcja instalacji samego klienta (bez serwera)
 - ✅ Bypass ExecutionPolicy dla jednorazowego uruchomienia
+- ✅ Automatyczne uruchomienie fbverpush.ps1 po instalacji
 
 ## Wsparcie
 

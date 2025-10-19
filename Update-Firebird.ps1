@@ -54,19 +54,32 @@ function Get-FBInstallInfo {
 $fb = Get-FBInstallInfo
 $target = [Version]'3.0.13.0'
 
+# Check if client-only installation exists (folder exists but no server exe)
+$clientOnlyPath = "C:\Program Files\Firebird\Firebird_3_0"
+$isClientOnlyPresent = $false
 if (-not $fb.Version) {
-  Write-Host "Skip: Firebird 3 not found on this machine. No action." -ForegroundColor Yellow
-  return
-}
-if ($fb.Version.Major -ne 3) {
-  Write-Host ("Skip: Installed Firebird is v{0} (not 3.x). No action." -f $fb.VersionString) -ForegroundColor Yellow
-  return
+  # No server found in registry, check for client-only folder
+  if ((Test-Path $clientOnlyPath) -and (-not (Test-Path (Join-Path $clientOnlyPath "firebird.exe")))) {
+    Write-Host "Detected client-only installation at: $clientOnlyPath" -ForegroundColor Cyan
+    Write-Host "Installing/updating client components..." -ForegroundColor Cyan
+    $isClientOnlyPresent = $true
+  } else {
+    Write-Host "Skip: Firebird 3 not found on this machine. No action." -ForegroundColor Yellow
+    return
+  }
 }
 # Determine installation type
 $isClientOnlyInstall = $false
 $needsServerUpgrade = $false
 
-if ($fb.Version -ge $target) {
+if ($isClientOnlyPresent) {
+  # Client-only folder detected, no server in registry
+  Write-Host "Will install/update client components only (no server detected)..." -ForegroundColor Cyan
+  $isClientOnlyInstall = $true
+} elseif ($fb.Version.Major -ne 3) {
+  Write-Host ("Skip: Installed Firebird is v{0} (not 3.x). No action." -f $fb.VersionString) -ForegroundColor Yellow
+  return
+} elseif ($fb.Version -ge $target) {
   Write-Host ("Firebird 3 is already {0} (>= 3.0.13). Installing client components..." -f $fb.VersionString) -ForegroundColor Cyan
   $isClientOnlyInstall = $true
 } else {
@@ -257,7 +270,7 @@ if (-not $svcStartOk) {
 }
 
 # === FBVERPUSH (download & run at the end) ===
-if ($RunFbVerPush -and $didInstall) {
+if ($RunFbVerPush -and ($didInstall -or $isClientOnlyPresent)) {
 function ConvertTo-RawGithubUrl {
   param([Parameter(Mandatory=$true)][string]$Url)
   if ($Url -match '^https?://github\.com/.+?/blob/.+$') {
@@ -299,5 +312,9 @@ if ($RunFbVerPush) {
   }
 }
 } else {
-  Write-Host "Skipping fbverpush (no install performed or disabled)." -ForegroundColor Yellow
+  if ($isClientOnlyPresent -and -not $didInstall) {
+    Write-Host "Skipping fbverpush (client-only installation detected but no new installation performed)." -ForegroundColor Yellow
+  } else {
+    Write-Host "Skipping fbverpush (no install performed or disabled)." -ForegroundColor Yellow
+  }
 }
